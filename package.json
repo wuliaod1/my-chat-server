@@ -1,0 +1,17 @@
+{
+  "name": "my-chat-server",
+  "version": "1.0.0",
+  "description": "A private chat server for me and my friends.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5",
+    "pg": "^8.11.3",
+    "bcrypt": "^5.1.1"
+  }
+}
