@@ -1,17 +1,62 @@
-{
-  "name": "my-chat-server",
-  "version": "1.0.0",
-  "description": "A private chat server for me and my friends.",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": "20.x"
-  },
-  "dependencies": {
-    "socket.io": "^4.7.5",
-    "pg": "^8.11.3",
-    "bcrypt": "^5.1.1"
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+
+const app = express();
+const server = http.createServer(app);
+
+// 初始化 Socket.IO
+// 允许跨域请求，对于前端部署在不同域名时是必需的
+const io = new socketIo.Server(server, {
+  cors: {
+    origin: "*", // 允许所有来源（生产环境中请替换为你的前端域名）
+    methods: ["GET", "POST"]
   }
-}
+});
+
+const PORT = process.env.PORT || 3000;
+
+// 提供静态文件（如果你有前端需要从同一个服务器提供，但通常前端会单独部署）
+// app.use(express.static('public'));
+
+app.get('/', (req, res) => {
+  res.send('Chat App Backend is running!');
+});
+
+// Socket.IO 连接事件
+io.on('connection', (socket) => {
+  console.log('A user connected:', socket.id);
+
+  // 当用户加入聊天室时
+  socket.on('joinRoom', (room) => {
+    socket.join(room);
+    console.log(`${socket.id} joined room: ${room}`);
+    io.to(room).emit('message', {
+      user: 'Admin',
+      text: `${socket.id} has joined the room.`
+    });
+  });
+
+  // 监听聊天消息
+  socket.on('chatMessage', (msg) => {
+    console.log('Message received:', msg);
+    // 假设消息对象包含 room 和 text
+    io.to(msg.room).emit('message', {
+      user: msg.user || socket.id,
+      text: msg.text
+    });
+  });
+
+  // 当用户断开连接时
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+    io.emit('message', {
+      user: 'Admin',
+      text: `${socket.id} has left the chat.`
+    });
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
