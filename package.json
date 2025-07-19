@@ -1,7 +1,7 @@
 {
   "name": "my-chat-server",
   "version": "2.0.0",
-  "description": "A private chat server with user identity and history.",
+  "description": "A private chat server with user identity, history, registration and friend functions.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
   "dependencies": {
     "socket.io": "^4.7.5",
     "sequelize": "^6.37.3",
-    "pg": "^8.11.5"
+    "pg": "^8.11.5",
+    "bcrypt": "^5.1.1"
   }
 }
