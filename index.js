@@ -3,25 +3,27 @@ import { Server } from 'socket.io';
 import { Sequelize, DataTypes } from 'sequelize';
 import bcrypt from 'bcrypt';
 
-// 数据库配置
+// --- 1. 数据库设置 ---
 const DATABASE_URL = 'postgresql://maochat_db_user:rEAW4zVBmNXHrJuYzaSLHBll9XYlJNxc@dpg-d1te8ljipnbc73c89skg-a/maochat_db';
+
+// 连接到数据库
 const sequelize = new Sequelize(DATABASE_URL, {
   dialect: 'postgres',
   dialectOptions: {
-    ssl: { require: true, rejectUnauthorized: false }
+    ssl: {
+      require: true,
+      rejectUnauthorized: false
+    }
   },
-  logging: false,
-  pool: { max: 5, min: 0, acquire: 30000, idle: 10000 }
+  logging: false
 });
 
-// 数据模型定义
-// 用户模型
+// 定义模型
 const User = sequelize.define('User', {
   username: {
     type: DataTypes.STRING,
     allowNull: false,
-    unique: true,
-    validate: { len: [2, 20] }
+    unique: true
   },
   password: {
     type: DataTypes.STRING,
@@ -33,7 +35,6 @@ const User = sequelize.define('User', {
   }
 });
 
-// 好友关系模型
 const Friend = sequelize.define('Friend', {
   status: {
     type: DataTypes.ENUM('pending', 'accepted', 'rejected'),
@@ -41,72 +42,480 @@ const Friend = sequelize.define('Friend', {
   }
 });
 
-// 消息模型（增加状态字段）
 const Message = sequelize.define('Message', {
   text: {
     type: DataTypes.STRING,
-    allowNull: false,
-    validate: { len: [1, 500] }
+    allowNull: false
   },
-  isRead: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false
+  status: {
+    type: DataTypes.ENUM('sent', 'delivered', 'read'),
+    defaultValue: 'sent'
   }
 });
 
-// 模型关系
-User.hasMany(Message, { foreignKey: 'senderId' });
-Message.belongsTo(User, { foreignKey: 'senderId', as: 'sender' });
-Message.belongsTo(User, { foreignKey: 'receiverId', as: 'receiver' });
-
+// 定义关联关系
 User.belongsToMany(User, { 
-  through: Friend,
+  through: Friend, 
+  as: 'Friends', 
   foreignKey: 'userId',
-  as: 'friends'
-});
-User.belongsToMany(User, { 
-  through: Friend,
-  foreignKey: 'friendId',
-  as: 'friendOf'
+  otherKey: 'friendId'
 });
 
-// 服务器配置
+Message.belongsTo(User, { as: 'Sender', foreignKey: 'senderId' });
+Message.belongsTo(User, { as: 'Receiver', foreignKey: 'receiverId' });
+User.hasMany(Message, { as: 'SentMessages', foreignKey: 'senderId' });
+User.hasMany(Message, { as: 'ReceivedMessages', foreignKey: 'receiverId' });
+
+// --- 2. 服务器设置 ---
 const httpServer = createServer();
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // 生产环境需改为具体域名
+    origin: "*",
     methods: ["GET", "POST"]
   }
 });
 
 const PORT = process.env.PORT || 3000;
-const SALT_ROUNDS = 10;
 
-// 工具函数
-const hashPassword = async (password) => bcrypt.hash(password, SALT_ROUNDS);
-const verifyPassword = async (password, hash) => bcrypt.compare(password, hash);
+// 存储用户socket映射
+const userSocketMap = new Map();
 
-// 核心逻辑
+// --- 3. 核心逻辑 ---
 io.on('connection', async (socket) => {
-  let currentUser = null;
-  console.log('New connection:', socket.id);
+  console.log('A user connected:', socket.id);
 
-  // 1. 注册功能
-  socket.on('register', async (userData, callback) => {
+  // 注册功能
+  socket.on('register', async (userData) => {
     try {
-      const { username, password } = userData;
-      if (!username || !password) {
-        return callback({ success: false, message: '用户名和密码不能为空' });
-      }
-
-      const existingUser = await User.findOne({ where: { username } });
+      // 检查用户名是否已存在
+      const existingUser = await User.findOne({ where: { username: userData.username } });
       if (existingUser) {
-        return callback({ success: false, message: '用户名已存在' });
+        return socket.emit('register response', { success: false, message: '用户名已存在' });
       }
 
-      const hashedPassword = await hashPassword(password);
-      const user = await User.create({
-        username,
+      // 密码加密
+      const hashedPassword = await bcrypt.hash(userData.password, 10);
+      
+      // 创建新用户
+      const newUser = await User.create({
+        username: userData.username,
+        password: hashedPassword
+      });
+
+      // 返回用户信息（不含密码）
+      const userWithoutPassword = { ...newUser.toJSON() };
+      delete userWithoutPassword.password;
+      
+      socket.emit('register response', { 
+        success: true, 
+        message: '注册成功',
+        user: userWithoutPassword
+      });
+    } catch (error) {
+      console.error('注册错误:', error);
+      socket.emit('register response', { success: false, message: '注册失败' });
+    }
+  });
+
+  // 登录功能
+  socket.on('login', async (credentials) => {
+    try {
+      // 查找用户
+      const user = await User.findOne({ where: { username: credentials.username } });
+      if (!user) {
+        return socket.emit('login response', { success: false, message: '用户名不存在' });
+      }
+
+      // 验证密码
+      const isPasswordValid = await bcrypt.compare(credentials.password, user.password);
+      if (!isPasswordValid) {
+        return socket.emit('login response', { success: false, message: '密码错误' });
+      }
+
+      // 更新在线状态
+      await user.update({ online: true });
+      
+      // 存储用户与socket的映射
+      userSocketMap.set(user.id, socket.id);
+      socket.userId = user.id;
+
+      // 返回用户信息（不含密码）
+      const userWithoutPassword = { ...user.toJSON() };
+      delete userWithoutPassword.password;
+      
+      socket.emit('login response', { 
+        success: true, 
+        message: '登录成功',
+        user: userWithoutPassword
+      });
+
+      // 通知好友该用户上线
+      const friends = await User.findAll({
+        include: [{
+          model: User,
+          as: 'Friends',
+          through: { where: { status: 'accepted' } },
+          where: { id: user.id }
+        }]
+      });
+      
+      friends.forEach(friend => {
+        const friendSocketId = userSocketMap.get(friend.id);
+        if (friendSocketId) {
+          io.to(friendSocketId).emit('user status change', {
+            userId: user.id,
+            username: user.username,
+            online: true
+          });
+        }
+      });
+    } catch (error) {
+      console.error('登录错误:', error);
+      socket.emit('login response', { success: false, message: '登录失败' });
+    }
+  });
+
+  // 添加好友功能
+  socket.on('add friend', async (data) => {
+    try {
+      const { currentUserId, friendUsername } = data;
+      
+      // 查找好友用户
+      const friendUser = await User.findOne({ where: { username: friendUsername } });
+      if (!friendUser) {
+        return socket.emit('add friend response', { success: false, message: '用户不存在' });
+      }
+      
+      // 不能添加自己为好友
+      if (friendUser.id === currentUserId) {
+        return socket.emit('add friend response', { success: false, message: '不能添加自己为好友' });
+      }
+      
+      // 检查是否已发送过请求
+      const existingRequest = await Friend.findOne({
+        where: {
+          userId: currentUserId,
+          friendId: friendUser.id
+        }
+      });
+      
+      if (existingRequest) {
+        return socket.emit('add friend response', { 
+          success: false, 
+          message: '已发送过好友请求' 
+        });
+      }
+      
+      // 创建好友请求
+      await Friend.create({
+        userId: currentUserId,
+        friendId: friendUser.id,
+        status: 'pending'
+      });
+      
+      // 通知被请求用户
+      const friendSocketId = userSocketMap.get(friendUser.id);
+      if (friendSocketId) {
+        io.to(friendSocketId).emit('friend request', {
+          fromUser: {
+            id: (await User.findByPk(currentUserId)).id,
+            username: (await User.findByPk(currentUserId)).username
+          }
+        });
+      }
+      
+      socket.emit('add friend response', { 
+        success: true, 
+        message: '好友请求已发送' 
+      });
+    } catch (error) {
+      console.error('添加好友错误:', error);
+      socket.emit('add friend response', { success: false, message: '添加好友失败' });
+    }
+  });
+
+  // 处理好友请求
+  socket.on('respond to friend request', async (data) => {
+    try {
+      const { requestUserId, response, currentUserId } = data;
+      
+      // 更新好友请求状态
+      await Friend.update(
+        { status: response === 'accept' ? 'accepted' : 'rejected' },
+        { where: { userId: requestUserId, friendId: currentUserId } }
+      );
+      
+      // 如果接受请求，创建反向关系
+      if (response === 'accept') {
+        await Friend.create({
+          userId: currentUserId,
+          friendId: requestUserId,
+          status: 'accepted'
+        });
+      }
+      
+      // 通知请求方
+      const requestUserSocketId = userSocketMap.get(requestUserId);
+      if (requestUserSocketId) {
+        io.to(requestUserSocketId).emit('friend request response', {
+          fromUser: {
+            id: (await User.findByPk(currentUserId)).id,
+            username: (await User.findByPk(currentUserId)).username
+          },
+          response
+        });
+      }
+      
+      socket.emit('respond to friend request response', { 
+        success: true, 
+        message: response === 'accept' ? '已接受好友请求' : '已拒绝好友请求'
+      });
+    } catch (error) {
+      console.error('处理好友请求错误:', error);
+      socket.emit('respond to friend request response', { success: false, message: '处理请求失败' });
+    }
+  });
+
+  // 获取好友列表
+  socket.on('get friends', async (userId) => {
+    try {
+      // 获取已接受的好友
+      const friends = await User.findByPk(userId, {
+        include: [{
+          model: User,
+          as: 'Friends',
+          through: { where: { status: 'accepted' } },
+          attributes: ['id', 'username', 'online']
+        }]
+      });
+      
+      socket.emit('friends list', {
+        friends: friends.Friends.map(friend => ({
+          id: friend.id,
+          username: friend.username,
+          online: friend.online
+        }))
+      });
+    } catch (error) {
+      console.error('获取好友列表错误:', error);
+      socket.emit('friends list', { friends: [] });
+    }
+  });
+
+  // 发送消息
+  socket.on('private message', async (messageData) => {
+    try {
+      const { senderId, receiverId, text } = messageData;
+      
+      // 检查是否是好友
+      const isFriend = await Friend.findOne({
+        where: {
+          userId: senderId,
+          friendId: receiverId,
+          status: 'accepted'
+        }
+      });
+      
+      if (!isFriend) {
+        return socket.emit('message response', { 
+          success: false, 
+          message: '只能给好友发送消息' 
+        });
+      }
+      
+      // 保存消息
+      const message = await Message.create({
+        senderId,
+        receiverId,
+        text,
+        status: 'sent'
+      });
+      
+      // 完整消息信息
+      const fullMessage = {
+        id: message.id,
+        text: message.text,
+        status: message.status,
+        createdAt: message.createdAt,
+        sender: {
+          id: (await User.findByPk(senderId)).id,
+          username: (await User.findByPk(senderId)).username
+        },
+        receiver: {
+          id: (await User.findByPk(receiverId)).id,
+          username: (await User.findByPk(receiverId)).username
+        }
+      };
+      
+      // 发送给接收者
+      const receiverSocketId = userSocketMap.get(receiverId);
+      if (receiverSocketId) {
+        // 更新消息状态为已送达
+        message.status = 'delivered';
+        await message.save();
+        fullMessage.status = 'delivered';
+        
+        io.to(receiverSocketId).emit('new message', fullMessage);
+      }
+      
+      // 发送给发送者
+      socket.emit('message response', {
+        success: true,
+        message: fullMessage
+      });
+    } catch (error) {
+      console.error('发送消息错误:', error);
+      socket.emit('message response', { success: false, message: '发送消息失败' });
+    }
+  });
+
+  // 标记消息为已读
+  socket.on('message read', async (messageId) => {
+    try {
+      const message = await Message.findByPk(messageId);
+      if (!message) return;
+      
+      // 更新消息状态
+      message.status = 'read';
+      await message.save();
+      
+      // 通知发送者消息已读
+      const senderSocketId = userSocketMap.get(message.senderId);
+      if (senderSocketId) {
+        io.to(senderSocketId).emit('message status update', {
+          messageId: message.id,
+          status: 'read'
+        });
+      }
+      
+      socket.emit('read confirmation', { messageId, status: 'read' });
+    } catch (error) {
+      console.error('标记已读错误:', error);
+    }
+  });
+
+  // 获取聊天历史
+  socket.on('get chat history', async (data) => {
+    try {
+      const { userId, friendId } = data;
+      
+      // 获取两人之间的消息
+      const messages = await Message.findAll({
+        where: {
+          [Sequelize.Op.or]: [
+            { senderId: userId, receiverId: friendId },
+            { senderId: friendId, receiverId: userId }
+          ]
+        },
+        order: [['createdAt', 'ASC']],
+        limit: 100
+      });
+      
+      // 格式化消息
+      const formattedMessages = await Promise.all(messages.map(async (msg) => ({
+        id: msg.id,
+        text: msg.text,
+        status: msg.status,
+        createdAt: msg.createdAt,
+        sender: {
+          id: (await User.findByPk(msg.senderId)).id,
+          username: (await User.findByPk(msg.senderId)).username
+        },
+        receiver: {
+          id: (await User.findByPk(msg.receiverId)).id,
+          username: (await User.findByPk(msg.receiverId)).username
+        }
+      })));
+      
+      socket.emit('chat history', {
+        messages: formattedMessages,
+        friend: {
+          id: (await User.findByPk(friendId)).id,
+          username: (await User.findByPk(friendId)).username
+        }
+      });
+      
+      // 标记接收的消息为已读
+      await Message.update(
+        { status: 'read' },
+        {
+          where: {
+            senderId: friendId,
+            receiverId: userId,
+            status: { [Sequelize.Op.in]: ['sent', 'delivered'] }
+          }
+        }
+      );
+      
+      // 通知发送者消息已读
+      const friendSocketId = userSocketMap.get(friendId);
+      if (friendSocketId) {
+        io.to(friendSocketId).emit('messages read', {
+          receiverId: userId,
+          status: 'read'
+        });
+      }
+    } catch (error) {
+      console.error('获取聊天历史错误:', error);
+      socket.emit('chat history', { messages: [] });
+    }
+  });
+
+  // 断开连接
+  socket.on('disconnect', async () => {
+    console.log('User disconnected:', socket.id);
+    
+    if (socket.userId) {
+      // 更新用户在线状态
+      const user = await User.findByPk(socket.userId);
+      if (user) {
+        user.online = false;
+        await user.save();
+        
+        // 从映射中移除
+        userSocketMap.delete(socket.userId);
+        
+        // 通知好友该用户下线
+        const friends = await User.findAll({
+          include: [{
+            model: User,
+            as: 'Friends',
+            through: { where: { status: 'accepted' } },
+            where: { id: socket.userId }
+          }]
+        });
+        
+        friends.forEach(friend => {
+          const friendSocketId = userSocketMap.get(friend.id);
+          if (friendSocketId) {
+            io.to(friendSocketId).emit('user status change', {
+              userId: user.id,
+              username: user.username,
+              online: false
+            });
+          }
+        });
+      }
+    }
+  });
+});
+
+// --- 4. 启动服务器 ---
+async function startServer() {
+  try {
+    // 同步数据库模型
+    await sequelize.sync({ alter: true }); // 使用alter: true来自动更新表结构
+    console.log('Database synced successfully.');
+    
+    httpServer.listen(PORT, () => {
+      console.log(`Server is listening on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Unable to connect to the database or start server:', error);
+  }
+}
+
+startServer();
         password: hashedPassword
       });
 
