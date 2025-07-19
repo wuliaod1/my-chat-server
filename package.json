@@ -1,62 +1,74 @@
+{
+  "name": "chat-backend-render",
+  "version": "1.0.0",
+  "description": "即时通讯软件后端，为Render部署准备",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.4.1",
+    "socket.io": "^4.7.5"
+  }
+}```
+
+---
+
+#### **3. `/ server.js`**
+
+```javascript
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const cors = require('cors');
+const mongoose = require('mongoose');
+const { Server } = require("socket.io");
+const initializeSocket = require('./socket/socket');
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 const server = http.createServer(app);
 
-// 初始化 Socket.IO
-// 允许跨域请求，对于前端部署在不同域名时是必需的
-const io = new socketIo.Server(server, {
+// 初始化 Socket.IO，并设定CORS，允许所有来源连接
+const io = new Server(server, {
   cors: {
-    origin: "*", // 允许所有来源（生产环境中请替换为你的前端域名）
+    origin: "*", // 在生产环境中，最好限制为你的前端URL
     methods: ["GET", "POST"]
   }
 });
 
-const PORT = process.env.PORT || 3000;
+// 将 io 实例传递给 socket 初始化函数
+initializeSocket(io);
 
-// 提供静态文件（如果你有前端需要从同一个服务器提供，但通常前端会单独部署）
-// app.use(express.static('public'));
+// API 路由
+app.use('/api/users', require('./routes/user.routes'));
 
+// 根路由，用于 Render 的健康检查
 app.get('/', (req, res) => {
-  res.send('Chat App Backend is running!');
+  res.status(200).send('聊天后端服务正在运行！');
 });
 
-// Socket.IO 连接事件
-io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
+// 从环境变量中获取 PORT，这是 Render 的标准做法
+const PORT = process.env.PORT || 3001;
 
-  // 当用户加入聊天室时
-  socket.on('joinRoom', (room) => {
-    socket.join(room);
-    console.log(`${socket.id} joined room: ${room}`);
-    io.to(room).emit('message', {
-      user: 'Admin',
-      text: `${socket.id} has joined the room.`
+// 连接 MongoDB
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log('成功连接到 MongoDB 数据库。');
+    server.listen(PORT, () => {
+      console.log(`服务器正在端口 ${PORT} 上运行。`);
     });
+  })
+  .catch((error) => {
+    console.error('数据库连接失败:', error.message);
+    process.exit(1); // 如果无法连接数据库，则终止应用
   });
-
-  // 监听聊天消息
-  socket.on('chatMessage', (msg) => {
-    console.log('Message received:', msg);
-    // 假设消息对象包含 room 和 text
-    io.to(msg.room).emit('message', {
-      user: msg.user || socket.id,
-      text: msg.text
-    });
-  });
-
-  // 当用户断开连接时
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-    io.emit('message', {
-      user: 'Admin',
-      text: `${socket.id} has left the chat.`
-    });
-  });
-});
-
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});

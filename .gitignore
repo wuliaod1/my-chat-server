@@ -1,0 +1,13 @@
+# 依赖文件夹
+/node_modules
+
+# 环境变量文件 (不上传到代码库)
+.env
+
+# 日志文件
+logs
+*.log
+npm-debug.log*
+
+# 系统生成文件
+.DS_Store
